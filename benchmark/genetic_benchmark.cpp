@@ -660,16 +660,16 @@ int main(int argc, char *argv[]) {
   try {
     if (argc < 2) {
       throw std::invalid_argument(
-          "Usage: genetic_benchmark {diabetes|cancer|housing} or "
-          "{sims-12|sims-13} [K]");
+          "Usage: genetic_benchmark "
+          "{diabetes|cancer|housing|silk-wave|square-wave}");
     }
     std::cout << "#lang racket\n";
     // Default datasets
     std::string regression_dataset = "benchmark/diabetes.csv";
     std::string classification_dataset = "benchmark/cancer.csv";
     std::string housing_dataset = "benchmark/housing.csv";
-    std::string sims12 = "benchmark/triangle-facets.png";
-    std::string sims13 = "benchmark/interference-color.png";
+    std::string silk_wave = "benchmark/silk-waves.png";
+    std::string square_wave = "benchmark/squared-waves.png";
 
     std::string arg_dset(argv[1]);
 
@@ -679,32 +679,16 @@ int main(int argc, char *argv[]) {
       run_symbolic_classification(classification_dataset);
     } else if (arg_dset == "housing") {
       run_symbolic_regression(housing_dataset);
-    } else if (arg_dset == "sims-12") {
-      if (argc > 3) {
-        throw std::invalid_argument("Usage: genetic_benchmark sims-12 [K]");
+    } else if (arg_dset == "silk-wave") {
+      if (argc != 2) {
+        throw std::invalid_argument("Usage: genetic_benchmark silk-wave");
       }
-      int K = 8;
-      if (argc == 3) {
-        size_t consumed = 0;
-        K = std::stoi(argv[2], &consumed);
-        if (consumed != std::string(argv[2]).size()) {
-          throw std::invalid_argument("K must be a positive integer");
-        }
+      run_symbolic_reconstruction(silk_wave, 3);
+    } else if (arg_dset == "square-wave") {
+      if (argc != 2) {
+        throw std::invalid_argument("Usage: genetic_benchmark square-wave");
       }
-      run_symbolic_reconstruction(sims12, K);
-    } else if (arg_dset == "sims-13") {
-      if (argc > 3) {
-        throw std::invalid_argument("Usage: genetic_benchmark sims-13 [K]");
-      }
-      int K = 3;
-      if (argc == 3) {
-        size_t consumed = 0;
-        K = std::stoi(argv[2], &consumed);
-        if (consumed != std::string(argv[2]).size()) {
-          throw std::invalid_argument("K must be a positive integer");
-        }
-      }
-      run_symbolic_reconstruction(sims13, K);
+      run_symbolic_reconstruction(square_wave, 8);
 
     } else {
       throw std::invalid_argument("Unknown benchmark: " + arg_dset);
