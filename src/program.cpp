@@ -21,33 +21,101 @@ namespace genetic {
 template <int MaxSize = MAX_STACK_SIZE>
 void execute_kernel(const program_t d_progs, const float *data, float *y_pred,
                     const uint64_t n_rows, const uint64_t n_progs) {
+  constexpr uint64_t B = 64;
+  alignas(64) float regs[MaxSize][B];
+  alignas(64) float dropped[B];
+  alignas(64) static const float zeros[B] = {};
+
   for (uint64_t pid = 0; pid < n_progs; ++pid) {
-    for (uint64_t row_id = 0; row_id < n_rows; ++row_id) {
+    const program_t curr_p = d_progs + pid;
+    for (uint64_t r0 = 0; r0 < n_rows; r0 += B) {
+      const uint64_t bs = std::min(B, n_rows - r0);
+      int sp = 0;
 
-      stack<float, MaxSize> eval_stack;
-      program_t curr_p = d_progs + pid; // Current program
+      for (int k = curr_p->len - 1; k >= 0; --k) {
+        const node &nd = curr_p->nodes[k];
+        float *out = (sp < MaxSize) ? regs[sp] : dropped;
 
-      int end = curr_p->len - 1;
-      node *curr_node = curr_p->nodes + end;
-
-      float res = 0.0f;
-      float in[2] = {0.0f, 0.0f};
-
-      while (end >= 0) {
-        if (detail::is_nonterminal(curr_node->t)) {
-          int ar = detail::arity(curr_node->t);
-          in[0] = eval_stack.pop(); // Min arity of function is 1
-          if (ar > 1)
-            in[1] = eval_stack.pop();
+        if (nd.t == node::type::constant) {
+          for (uint64_t i = 0; i < bs; ++i)
+            out[i] = nd.u.val;
+        } else if (nd.t == node::type::variable) {
+          const float *col = data + n_rows * nd.u.fid + r0;
+          for (uint64_t i = 0; i < bs; ++i)
+            out[i] = col[i];
+        } else {
+          const int ar = detail::arity(nd.t);
+          const float *a = zeros, *b = zeros;
+          if (sp > 0)
+            a = regs[--sp];
+          if (ar > 1 && sp > 0)
+            b = regs[--sp];
+          out = regs[sp];
+          switch (nd.t) {
+          case node::type::add:
+#pragma clang loop vectorize(assume_safety)
+            for (uint64_t i = 0; i < bs; ++i)
+              out[i] = a[i] + b[i];
+            break;
+          case node::type::sub:
+#pragma clang loop vectorize(assume_safety)
+            for (uint64_t i = 0; i < bs; ++i)
+              out[i] = a[i] - b[i];
+            break;
+          case node::type::mul:
+#pragma clang loop vectorize(assume_safety)
+            for (uint64_t i = 0; i < bs; ++i)
+              out[i] = a[i] * b[i];
+            break;
+          case node::type::fdim:
+#pragma clang loop vectorize(assume_safety)
+            for (uint64_t i = 0; i < bs; ++i)
+              out[i] = a[i] <= b[i] ? 0.0f : a[i] - b[i];
+            break;
+          case node::type::abs:
+#pragma clang loop vectorize(assume_safety)
+            for (uint64_t i = 0; i < bs; ++i)
+              out[i] = fabsf(a[i]);
+            break;
+          case node::type::sq:
+#pragma clang loop vectorize(assume_safety)
+            for (uint64_t i = 0; i < bs; ++i)
+              out[i] = a[i] * a[i];
+            break;
+          case node::type::sqrt:
+#pragma clang loop vectorize(assume_safety)
+            for (uint64_t i = 0; i < bs; ++i)
+              out[i] = sqrtf(fabsf(a[i]));
+            break;
+          case node::type::sin:
+            for (uint64_t i = 0; i < bs; ++i)
+              out[i] = sinf(a[i]);
+            break;
+          case node::type::cos:
+            for (uint64_t i = 0; i < bs; ++i)
+              out[i] = cosf(a[i]);
+            break;
+          case node::type::log:
+            for (uint64_t i = 0; i < bs; ++i)
+              out[i] = fabsf(a[i]) < detail::MIN_VAL ? 0.f : logf(fabsf(a[i]));
+            break;
+          default:
+            for (uint64_t i = 0; i < bs; ++i) {
+              float in[2] = {a[i], ar > 1 ? b[i] : 0.0f};
+              out[i] = detail::evaluate_node(nd, data, n_rows, r0 + i, in);
+            }
+            break;
+          }
         }
-        res = detail::evaluate_node(*curr_node, data, n_rows, row_id, in);
-        eval_stack.push(res);
-        curr_node--;
-        end--;
+        if (sp < MaxSize)
+          ++sp;
       }
 
-      // Outputs stored in col-major format
-      y_pred[pid * n_rows + row_id] = eval_stack.pop();
+      float *dst = y_pred + pid * n_rows + r0;
+      if (sp > 0)
+        std::copy(regs[sp - 1], regs[sp - 1] + bs, dst);
+      else
+        std::fill(dst, dst + bs, 0.0f);
     }
   }
 }
