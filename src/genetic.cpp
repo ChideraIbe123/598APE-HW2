@@ -15,8 +15,8 @@
 #include <random>
 #include <stack>
 #include <sstream>
-#include <string>
-#include <unordered_map>
+#include <cstdint>
+#include <cstring>
 namespace genetic {
 
 /**
@@ -77,16 +77,34 @@ void tournament_kernel(const std::vector<program> &progs, int *win_indices,
   }
 }
 
-static std::string program_key(const program &p) {
-  std::string k;
-  k.reserve(p.len * 8);
+static uint64_t program_hash(const program &p) {
+  uint64_t h = 0x9E3779B97F4A7C15ull ^ static_cast<uint64_t>(p.len);
   for (int j = 0; j < p.len; ++j) {
     const node &nd = p.nodes[j];
-    k.append(reinterpret_cast<const char *>(&nd.t), sizeof(nd.t));
-    if (nd.t == node::type::variable || nd.t == node::type::constant)
-      k.append(reinterpret_cast<const char *>(&nd.u), sizeof(nd.u));
+    uint64_t w = static_cast<uint64_t>(nd.t) << 32;
+    if (nd.t == node::type::variable || nd.t == node::type::constant) {
+      uint32_t bits;
+      std::memcpy(&bits, &nd.u, sizeof(bits));
+      w |= bits;
+    }
+    h = (h ^ w) * 0xFF51AFD7ED558CCDull;
+    h ^= h >> 32;
   }
-  return k;
+  return h;
+}
+
+static bool same_program(const program &a, const program &b) {
+  if (a.len != b.len)
+    return false;
+  for (int j = 0; j < a.len; ++j) {
+    const node &x = a.nodes[j], &y = b.nodes[j];
+    if (x.t != y.t)
+      return false;
+    if ((x.t == node::type::variable || x.t == node::type::constant) &&
+        std::memcmp(&x.u, &y.u, sizeof(x.u)) != 0)
+      return false;
+  }
+  return true;
 }
 
 /**
@@ -193,32 +211,54 @@ void cpp_evolve(const std::vector<program> &h_oldprogs,
   }
 
   // Update raw fitness for all programs
-  std::unordered_map<std::string, float> cache;
+  struct cache_slot {
+    uint64_t h;
+    const program *p;
+    float fit;
+    int src;
+  };
+  size_t cap = 1;
+  while (cap < 2 * (h_oldprogs.size() + (size_t)n_progs))
+    cap <<= 1;
+  std::vector<cache_slot> table(cap, cache_slot{0, nullptr, 0.0f, -1});
+  auto find_slot = [&](const program &p, uint64_t h) {
+    size_t s = h & (cap - 1);
+    while (table[s].p && !(table[s].h == h && same_program(*table[s].p, p)))
+      s = (s + 1) & (cap - 1);
+    return s;
+  };
+
   if (generation > 1) {
-    for (const auto &p : h_oldprogs)
-      cache.emplace(program_key(p), p.raw_fitness_);
+    for (const auto &p : h_oldprogs) {
+      uint64_t h = program_hash(p);
+      size_t s = find_slot(p, h);
+      if (!table[s].p)
+        table[s] = cache_slot{h, &p, p.raw_fitness_, -1};
+    }
   }
 
-  std::vector<std::string> keys(n_progs);
-  std::unordered_map<std::string, int> pending;
+  std::vector<size_t> where(n_progs);
   std::vector<program> to_eval;
   for (auto i = 0; i < n_progs; ++i) {
-    keys[i] = program_key(h_nextprogs[i]);
-    if (cache.count(keys[i]) == 0 && pending.count(keys[i]) == 0) {
-      pending.emplace(keys[i], (int)to_eval.size());
+    uint64_t h = program_hash(h_nextprogs[i]);
+    size_t s = find_slot(h_nextprogs[i], h);
+    if (!table[s].p) {
+      table[s] = cache_slot{h, &h_nextprogs[i], 0.0f, (int)to_eval.size()};
       to_eval.emplace_back(h_nextprogs[i]);
     }
+    where[i] = s;
   }
 
   if (!to_eval.empty()) {
     set_batched_fitness((int)to_eval.size(), to_eval, params, n_samples, data,
                         y, sample_weights);
   }
-  for (const auto &kv : pending)
-    cache.emplace(kv.first, to_eval[kv.second].raw_fitness_);
 
-  for (auto i = 0; i < n_progs; ++i)
-    h_nextprogs[i].raw_fitness_ = cache.at(keys[i]);
+  for (auto i = 0; i < n_progs; ++i) {
+    const cache_slot &c = table[where[i]];
+    h_nextprogs[i].raw_fitness_ =
+        c.src < 0 ? c.fit : to_eval[c.src].raw_fitness_;
+  }
 }
 
 float param::p_reproduce() const {
