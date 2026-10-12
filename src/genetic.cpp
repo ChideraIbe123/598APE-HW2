@@ -15,6 +15,8 @@
 #include <random>
 #include <stack>
 #include <sstream>
+#include <string>
+#include <unordered_map>
 namespace genetic {
 
 /**
@@ -73,6 +75,18 @@ void tournament_kernel(const std::vector<program> &progs, int *win_indices,
     // Set win index
     win_indices[idx] = opt;
   }
+}
+
+static std::string program_key(const program &p) {
+  std::string k;
+  k.reserve(p.len * 8);
+  for (int j = 0; j < p.len; ++j) {
+    const node &nd = p.nodes[j];
+    k.append(reinterpret_cast<const char *>(&nd.t), sizeof(nd.t));
+    if (nd.t == node::type::variable || nd.t == node::type::constant)
+      k.append(reinterpret_cast<const char *>(&nd.u), sizeof(nd.u));
+  }
+  return k;
 }
 
 /**
@@ -179,8 +193,32 @@ void cpp_evolve(const std::vector<program> &h_oldprogs,
   }
 
   // Update raw fitness for all programs
-  set_batched_fitness(n_progs, h_nextprogs, params, n_samples, data, y,
-                      sample_weights);
+  std::unordered_map<std::string, float> cache;
+  if (generation > 1) {
+    for (const auto &p : h_oldprogs)
+      cache.emplace(program_key(p), p.raw_fitness_);
+  }
+
+  std::vector<std::string> keys(n_progs);
+  std::unordered_map<std::string, int> pending;
+  std::vector<program> to_eval;
+  for (auto i = 0; i < n_progs; ++i) {
+    keys[i] = program_key(h_nextprogs[i]);
+    if (cache.count(keys[i]) == 0 && pending.count(keys[i]) == 0) {
+      pending.emplace(keys[i], (int)to_eval.size());
+      to_eval.emplace_back(h_nextprogs[i]);
+    }
+  }
+
+  if (!to_eval.empty()) {
+    set_batched_fitness((int)to_eval.size(), to_eval, params, n_samples, data,
+                        y, sample_weights);
+  }
+  for (const auto &kv : pending)
+    cache.emplace(kv.first, to_eval[kv.second].raw_fitness_);
+
+  for (auto i = 0; i < n_progs; ++i)
+    h_nextprogs[i].raw_fitness_ = cache.at(keys[i]);
 }
 
 float param::p_reproduce() const {
