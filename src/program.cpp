@@ -5,6 +5,10 @@
 #include "reg_stack.h"
 #include <algorithm>
 #include <cstdint>
+#include <cstring>
+#include <deque>
+#include <unordered_map>
+#include <vector>
 #include <fitness.h>
 #include <node.h>
 #include <numeric>
@@ -14,109 +18,254 @@
 
 namespace genetic {
 
+struct leaf_subst {
+  const float *vals;
+  int start;
+};
+
 /**
  * Execution kernel for a single program. We assume that the input data
  * is stored in column major format.
  */
 template <int MaxSize = MAX_STACK_SIZE>
-void execute_kernel(const program_t d_progs, const float *data, float *y_pred,
-                    const uint64_t n_rows, const uint64_t n_progs) {
+void eval_nodes(const node *nodes, int len, const float *data, float *y,
+                const uint64_t n_rows, const int *subst_at,
+                const leaf_subst *subst) {
   constexpr uint64_t B = 64;
   alignas(64) float regs[MaxSize][B];
   alignas(64) float dropped[B];
   alignas(64) static const float zeros[B] = {};
 
-  for (uint64_t pid = 0; pid < n_progs; ++pid) {
-    const program_t curr_p = d_progs + pid;
-    for (uint64_t r0 = 0; r0 < n_rows; r0 += B) {
-      const uint64_t bs = std::min(B, n_rows - r0);
-      int sp = 0;
+  for (uint64_t r0 = 0; r0 < n_rows; r0 += B) {
+    const uint64_t bs = std::min(B, n_rows - r0);
+    int sp = 0;
 
-      for (int k = curr_p->len - 1; k >= 0; --k) {
-        const node &nd = curr_p->nodes[k];
-        float *out = (sp < MaxSize) ? regs[sp] : dropped;
+    for (int k = len - 1; k >= 0; --k) {
+      const node &nd = nodes[k];
+      float *out = (sp < MaxSize) ? regs[sp] : dropped;
 
-        if (nd.t == node::type::constant) {
+      if (subst_at && subst_at[k] >= 0) {
+        const leaf_subst &ls = subst[subst_at[k]];
+        for (uint64_t i = 0; i < bs; ++i)
+          out[i] = ls.vals[r0 + i];
+        k = ls.start;
+      } else if (nd.t == node::type::constant) {
+        for (uint64_t i = 0; i < bs; ++i)
+          out[i] = nd.u.val;
+      } else if (nd.t == node::type::variable) {
+        const float *col = data + n_rows * nd.u.fid + r0;
+        for (uint64_t i = 0; i < bs; ++i)
+          out[i] = col[i];
+      } else {
+        const int ar = detail::arity(nd.t);
+        const float *a = zeros, *b = zeros;
+        if (sp > 0)
+          a = regs[--sp];
+        if (ar > 1 && sp > 0)
+          b = regs[--sp];
+        out = regs[sp];
+        switch (nd.t) {
+        case node::type::add:
+#pragma clang loop vectorize(assume_safety)
           for (uint64_t i = 0; i < bs; ++i)
-            out[i] = nd.u.val;
-        } else if (nd.t == node::type::variable) {
-          const float *col = data + n_rows * nd.u.fid + r0;
+            out[i] = a[i] + b[i];
+          break;
+        case node::type::sub:
+#pragma clang loop vectorize(assume_safety)
           for (uint64_t i = 0; i < bs; ++i)
-            out[i] = col[i];
-        } else {
-          const int ar = detail::arity(nd.t);
-          const float *a = zeros, *b = zeros;
-          if (sp > 0)
-            a = regs[--sp];
-          if (ar > 1 && sp > 0)
-            b = regs[--sp];
-          out = regs[sp];
-          switch (nd.t) {
-          case node::type::add:
+            out[i] = a[i] - b[i];
+          break;
+        case node::type::mul:
 #pragma clang loop vectorize(assume_safety)
-            for (uint64_t i = 0; i < bs; ++i)
-              out[i] = a[i] + b[i];
-            break;
-          case node::type::sub:
+          for (uint64_t i = 0; i < bs; ++i)
+            out[i] = a[i] * b[i];
+          break;
+        case node::type::fdim:
 #pragma clang loop vectorize(assume_safety)
-            for (uint64_t i = 0; i < bs; ++i)
-              out[i] = a[i] - b[i];
-            break;
-          case node::type::mul:
+          for (uint64_t i = 0; i < bs; ++i)
+            out[i] = a[i] <= b[i] ? 0.0f : a[i] - b[i];
+          break;
+        case node::type::abs:
 #pragma clang loop vectorize(assume_safety)
-            for (uint64_t i = 0; i < bs; ++i)
-              out[i] = a[i] * b[i];
-            break;
-          case node::type::fdim:
+          for (uint64_t i = 0; i < bs; ++i)
+            out[i] = fabsf(a[i]);
+          break;
+        case node::type::sq:
 #pragma clang loop vectorize(assume_safety)
-            for (uint64_t i = 0; i < bs; ++i)
-              out[i] = a[i] <= b[i] ? 0.0f : a[i] - b[i];
-            break;
-          case node::type::abs:
+          for (uint64_t i = 0; i < bs; ++i)
+            out[i] = a[i] * a[i];
+          break;
+        case node::type::sqrt:
 #pragma clang loop vectorize(assume_safety)
-            for (uint64_t i = 0; i < bs; ++i)
-              out[i] = fabsf(a[i]);
-            break;
-          case node::type::sq:
-#pragma clang loop vectorize(assume_safety)
-            for (uint64_t i = 0; i < bs; ++i)
-              out[i] = a[i] * a[i];
-            break;
-          case node::type::sqrt:
-#pragma clang loop vectorize(assume_safety)
-            for (uint64_t i = 0; i < bs; ++i)
-              out[i] = sqrtf(fabsf(a[i]));
-            break;
-          case node::type::sin:
-            for (uint64_t i = 0; i < bs; ++i)
-              out[i] = sinf(a[i]);
-            break;
-          case node::type::cos:
-            for (uint64_t i = 0; i < bs; ++i)
-              out[i] = cosf(a[i]);
-            break;
-          case node::type::log:
-            for (uint64_t i = 0; i < bs; ++i)
-              out[i] = fabsf(a[i]) < detail::MIN_VAL ? 0.f : logf(fabsf(a[i]));
-            break;
-          default:
-            for (uint64_t i = 0; i < bs; ++i) {
-              float in[2] = {a[i], ar > 1 ? b[i] : 0.0f};
-              out[i] = detail::evaluate_node(nd, data, n_rows, r0 + i, in);
-            }
-            break;
+          for (uint64_t i = 0; i < bs; ++i)
+            out[i] = sqrtf(fabsf(a[i]));
+          break;
+        case node::type::sin:
+          for (uint64_t i = 0; i < bs; ++i)
+            out[i] = sinf(a[i]);
+          break;
+        case node::type::cos:
+          for (uint64_t i = 0; i < bs; ++i)
+            out[i] = cosf(a[i]);
+          break;
+        case node::type::log:
+          for (uint64_t i = 0; i < bs; ++i)
+            out[i] = fabsf(a[i]) < detail::MIN_VAL ? 0.f : logf(fabsf(a[i]));
+          break;
+        default:
+          for (uint64_t i = 0; i < bs; ++i) {
+            float in[2] = {a[i], ar > 1 ? b[i] : 0.0f};
+            out[i] = detail::evaluate_node(nd, data, n_rows, r0 + i, in);
+          }
+          break;
+        }
+      }
+      if (sp < MaxSize)
+        ++sp;
+    }
+
+    float *dst = y + r0;
+    if (sp > 0)
+      std::copy(regs[sp - 1], regs[sp - 1] + bs, dst);
+    else
+      std::fill(dst, dst + bs, 0.0f);
+  }
+}
+
+struct shared_subtree {
+  int pid;
+  int k;
+  int count;
+  int table;
+};
+
+static bool same_range(const node *a, const node *b, int len) {
+  for (int j = 0; j < len; ++j) {
+    if (a[j].t != b[j].t)
+      return false;
+    if ((a[j].t == node::type::variable || a[j].t == node::type::constant) &&
+        std::memcmp(&a[j].u, &b[j].u, sizeof(a[j].u)) != 0)
+      return false;
+  }
+  return true;
+}
+
+template <int MaxSize> struct subtree_cache {
+  const program_t progs;
+  const float *data;
+  uint64_t n_rows;
+  std::vector<std::vector<uint64_t>> hash;
+  std::vector<std::vector<int>> end;
+  std::unordered_map<uint64_t, shared_subtree> shared;
+  std::deque<std::vector<float>> tables;
+  size_t budget;
+
+  void eval_range(int pid, int start, float *out) {
+    const program &p = progs[pid];
+    const int stop = end[pid][start];
+    std::vector<int> subst_at;
+    std::vector<leaf_subst> subst;
+    for (int j = start + 1; j < stop;) {
+      const node &nd = p.nodes[j];
+      if (nd.t != node::type::variable && nd.t != node::type::constant) {
+        auto it = shared.find(hash[pid][j]);
+        if (it != shared.end() && it->second.count >= 2) {
+          shared_subtree &s = it->second;
+          if (s.table < 0 && tables.size() < budget) {
+            tables.emplace_back(n_rows);
+            const int t = (int)tables.size() - 1;
+            eval_range(s.pid, s.k, tables[t].data());
+            s.table = t;
+          }
+          if (s.table >= 0) {
+            if (subst_at.empty())
+              subst_at.assign(stop - start, -1);
+            subst_at[end[pid][j] - 1 - start] = (int)subst.size();
+            subst.push_back({tables[s.table].data(), j - start});
+            j = end[pid][j];
+            continue;
           }
         }
-        if (sp < MaxSize)
-          ++sp;
       }
-
-      float *dst = y_pred + pid * n_rows + r0;
-      if (sp > 0)
-        std::copy(regs[sp - 1], regs[sp - 1] + bs, dst);
-      else
-        std::fill(dst, dst + bs, 0.0f);
+      ++j;
     }
+    eval_nodes<MaxSize>(p.nodes + start, stop - start, data, out, n_rows,
+                        subst.empty() ? nullptr : subst_at.data(),
+                        subst.data());
+  }
+};
+
+template <int MaxSize = MAX_STACK_SIZE>
+void execute_kernel(const program_t d_progs, const float *data, float *y_pred,
+                    const uint64_t n_rows, const uint64_t n_progs) {
+  subtree_cache<MaxSize> c{d_progs, data, n_rows, {}, {}, {}, {}, 0};
+  c.budget = std::max<size_t>(1, (size_t(256) << 20) / (n_rows * sizeof(float)));
+  c.hash.resize(n_progs);
+  c.end.resize(n_progs);
+  std::vector<char> ok(n_progs, 1);
+  std::vector<int> st;
+
+  for (uint64_t pid = 0; pid < n_progs; ++pid) {
+    const program &p = d_progs[pid];
+    std::vector<uint64_t> &h = c.hash[pid];
+    std::vector<int> &e = c.end[pid];
+    h.assign(p.len, 0);
+    e.assign(p.len, 0);
+    st.clear();
+    for (int k = p.len - 1; k >= 0 && ok[pid]; --k) {
+      const node &nd = p.nodes[k];
+      uint64_t x = 0x9E3779B97F4A7C15ull ^ (static_cast<uint64_t>(nd.t) << 32);
+      e[k] = k + 1;
+      if (nd.t == node::type::variable || nd.t == node::type::constant) {
+        uint32_t bits;
+        std::memcpy(&bits, &nd.u, sizeof(bits));
+        x ^= bits;
+      } else {
+        const int ar = detail::arity(nd.t);
+        if ((int)st.size() < ar) {
+          ok[pid] = 0;
+          break;
+        }
+        for (int a = 0; a < ar; ++a) {
+          x = (x ^ h[st.back()]) * 0xFF51AFD7ED558CCDull;
+          x ^= x >> 29;
+          e[k] = e[st.back()];
+          st.pop_back();
+        }
+      }
+      h[k] = x * 0xC4CEB9FE1A85EC53ull;
+      if ((int)st.size() >= MaxSize)
+        ok[pid] = 0;
+      st.push_back(k);
+    }
+    if (st.size() != 1)
+      ok[pid] = 0;
+    if (!ok[pid])
+      continue;
+    for (int k = 0; k < p.len; ++k) {
+      const node &nd = p.nodes[k];
+      if (nd.t == node::type::variable || nd.t == node::type::constant)
+        continue;
+      auto ins = c.shared.try_emplace(h[k], shared_subtree{(int)pid, k, 0, -1});
+      shared_subtree &s = ins.first->second;
+      if (s.count < 0)
+        continue;
+      if (!ins.second &&
+          (c.end[s.pid][s.k] - s.k != e[k] - k ||
+           !same_range(d_progs[s.pid].nodes + s.k, p.nodes + k, e[k] - k))) {
+        s.count = -1;
+        continue;
+      }
+      ++s.count;
+    }
+  }
+
+  for (uint64_t pid = 0; pid < n_progs; ++pid) {
+    if (ok[pid])
+      c.eval_range((int)pid, 0, y_pred + pid * n_rows);
+    else
+      eval_nodes<MaxSize>(d_progs[pid].nodes, d_progs[pid].len, data,
+                          y_pred + pid * n_rows, n_rows, nullptr, nullptr);
   }
 }
 
