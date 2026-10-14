@@ -189,6 +189,8 @@ template <int MaxSize> struct subtree_cache {
       }
       ++j;
     }
+    if (!out)
+      return;
     eval_nodes<MaxSize>(p.nodes + start, stop - start, data, out, n_rows,
                         subst.empty() ? nullptr : subst_at.data(),
                         subst.data());
@@ -260,6 +262,11 @@ void execute_kernel(const program_t d_progs, const float *data, float *y_pred,
     }
   }
 
+  for (uint64_t pid = 0; pid < n_progs; ++pid)
+    if (ok[pid])
+      c.eval_range((int)pid, 0, nullptr);
+
+#pragma omp parallel for schedule(dynamic, 1)
   for (uint64_t pid = 0; pid < n_progs; ++pid) {
     if (ok[pid])
       c.eval_range((int)pid, 0, y_pred + pid * n_rows);
