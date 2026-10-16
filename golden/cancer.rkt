@@ -30,7 +30,7 @@
   (define (rsqrt a) (/ 1.0 (sqrt (abs a))))
   (define (gp-log a) (if (< (abs a) 0.001) 0.0 (log (abs a))))
   (define (gp-sqrt a) (sqrt (abs a)))
-  (-  (+  (*  (fdim  (list-ref X 24) (list-ref X 27))  (-  (list-ref X 22) (list-ref X 13)) )  (-  (cos  (*  (list-ref X 21) (list-ref X 7)) )  (*  (list-ref X 21) (list-ref X 7)) ) )  (cos  (gp-sqrt  (list-ref X 22)) ) ) ))
+  (-  (+  (cos  (*  (list-ref X 21) (list-ref X 7)) )  (-  (*  (fdim  (list-ref X 24) (list-ref X 27))  (-  (list-ref X 22) (list-ref X 13)) )  (*  (list-ref X 21) (list-ref X 7)) ) )  (cos  (gp-sqrt  (list-ref X 22)) ) ) ))
 ;;Best program 2 details:
 ;;- Length: 20 nodes
 ;;- Depth: 5
@@ -55,5 +55,5 @@
   (define (rsqrt a) (/ 1.0 (sqrt (abs a))))
   (define (gp-log a) (if (< (abs a) 0.001) 0.0 (log (abs a))))
   (define (gp-sqrt a) (sqrt (abs a)))
-  (-  (+  (cos  (*  (list-ref X 21) (list-ref X 7)) )  (-  (*  (fdim  (list-ref X 24) (list-ref X 27))  (-  (list-ref X 22) (list-ref X 13)) )  (*  (list-ref X 21) (list-ref X 7)) ) )  (cos  (gp-sqrt  (list-ref X 22)) ) ) ))
-;;Time(Symbolic Classification (End-to-End)) = 134.022396251 sec
+  (+  (cos  (*  (list-ref X 21) (list-ref X 7)) )  (-  (-  (*  (fdim  (list-ref X 24) (list-ref X 27))  (-  (list-ref X 22) (list-ref X 13)) )  (*  (list-ref X 21) (list-ref X 7)) )  (cos  (gp-sqrt  (list-ref X 22)) ) ) ) ))
+;;Time(Symbolic Classification (End-to-End)) = 127.713039427 sec

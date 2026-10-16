@@ -23,12 +23,14 @@ The time is the last line of the output. The other benchmarks are `housing`, `ca
 
 ## Checking the output
 
-`golden/` has the output from the original code. To check that a run matches it:
+`golden/` has the output from the original code, made inside the Docker image. To check that a run matches it:
 
 ```bash
 ./genetic_benchmark cancer > out.rkt
 diff <(head -n -1 out.rkt) <(head -n -1 golden/cancer.rkt) && echo same
 ```
+
+If you run outside Docker, `cancer` might not match because a different glibc gives slightly different `exp`/`log` results. In that case, compare against the baseline built on the same machine.
 
 ## Running the baseline
 
